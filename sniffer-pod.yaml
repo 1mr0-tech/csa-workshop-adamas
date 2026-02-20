@@ -1,0 +1,21 @@
+# Privileged sniffer pod — uses hostNetwork to see the cni0 bridge directly
+# Deploy this, exec into it, run tcpdump -i cni0
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sniffer-pod
+  namespace: vulnerable-app
+spec:
+  nodeSelector:
+    node-role: demo
+  # Share the HOST network namespace — sees cni0 and all veth pairs
+  hostNetwork: true
+  hostPID: true
+  tolerations:
+    - operator: "Exists"
+  containers:
+    - name: sniffer
+      image: nicolaka/netshoot
+      command: ["sleep", "infinity"]
+      securityContext:
+        privileged: true

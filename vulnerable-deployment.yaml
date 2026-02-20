@@ -1,0 +1,137 @@
+
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vulnerable-app
+
+---
+# ⚠️  INSECURE: ClusterRole granting broad permissions including cluster-scoped resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: demo-cluster-admin-role
+rules:
+  # Namespaced resources
+  - apiGroups: [""]
+    resources: ["pods", "secrets", "configmaps", "serviceaccounts", "services"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Cluster-scoped resources — explicitly required to list namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "delete"]
+
+---
+# ⚠️  INSECURE: Broad ClusterRole bound to the DEFAULT service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: demo-default-sa-binding
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: vulnerable-app
+roleRef:
+  kind: ClusterRole
+  name: demo-cluster-admin-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ⚠️  INSECURE: Privileged vulnerable app - pinned to agent node
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vulnerable-app
+  namespace: vulnerable-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vulnerable-app
+  template:
+    metadata:
+      labels:
+        app: vulnerable-app
+    spec:
+      nodeSelector:
+        node-role: demo
+      tolerations:
+        - operator: "Exists"
+      serviceAccountName: default
+      hostPID: true
+      containers:
+        - name: app
+          image: vulnerable-demo-app:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5000
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vulnerable-app
+  namespace: vulnerable-app
+spec:
+  selector:
+    app: vulnerable-app
+  ports:
+    - port: 5000
+      targetPort: 5000
+
+---
+# ⚠️  INSECURE: Backend returning plaintext credentials over HTTP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-api
+  namespace: vulnerable-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend-api
+  template:
+    metadata:
+      labels:
+        app: backend-api
+    spec:
+      nodeSelector:
+        node-role: demo
+      tolerations:
+        - operator: "Exists"
+      containers:
+        - name: backend
+          image: python:3.9-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install flask -q && python3 -c "
+              from flask import Flask
+              app = Flask(__name__)
+              @app.route('/api/login', methods=['GET'])
+              def login():
+                  return '{\"user\":\"admin\",\"password\":\"P@ssw0rd!\",\"db_host\":\"postgres.internal\",\"db_pass\":\"superSecret99\"}'
+              app.run(host='0.0.0.0', port=8080)
+              "
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-api
+  namespace: vulnerable-app
+spec:
+  selector:
+    app: backend-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+

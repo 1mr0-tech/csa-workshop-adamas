@@ -1,0 +1,100 @@
+# ✅  SECURE VERSION - Remediated deployment
+# Shows how to fix all the issues from the vulnerable deployment
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-app
+
+---
+# ✅  SECURE: Dedicated service account (not default)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-service-account
+  namespace: secure-app
+automountServiceAccountToken: false   # ✅ Don't auto-mount unless needed
+
+---
+# ✅  SECURE: Minimal RBAC - only what the app actually needs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-minimal-role
+  namespace: secure-app
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]              # read-only, only configmaps, only in own namespace
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: app-role-binding
+  namespace: secure-app
+subjects:
+  - kind: ServiceAccount
+    name: app-service-account
+    namespace: secure-app
+roleRef:
+  kind: Role
+  name: app-minimal-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ✅  SECURE: Hardened deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-app
+  namespace: secure-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: secure-app
+  template:
+    metadata:
+      labels:
+        app: secure-app
+    spec:
+      serviceAccountName: app-service-account
+
+      # ✅  SECURE: No hostPID
+      hostPID: false
+
+      # ✅  SECURE: Pod-level security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: app
+          image: secure-demo-app:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5000
+          # ✅  SECURE: Container-level security context
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop:
+                - ALL    # drop ALL Linux capabilities
+
+          # ✅  SECURE: Resource limits (prevent DoS)
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+            requests:
+              cpu: "100m"
+              memory: "128Mi"

